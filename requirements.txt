@@ -1,0 +1,5 @@
+appdirs==1.4.4
+pyparsing==3.2.5
+PyYAML==6.0.3
+rdflib==7.2.1
+SPARQLWrapper==2.0.0

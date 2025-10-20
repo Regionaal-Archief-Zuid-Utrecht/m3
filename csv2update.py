@@ -27,9 +27,9 @@ WHERE {
 
 import re
 import sys
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from csv_edits import CsvEdits
-
+from rdf_helpers import RdfHelpers
 
 def parse_predicate_object_list(value: str) -> List[Tuple[str, str]]:
     """Parse a predicate-object list like 'p1 o1 ; p2 o2' into [(p1,o1), (p2,o2)].
@@ -59,16 +59,33 @@ def parse_predicate_object_list(value: str) -> List[Tuple[str, str]]:
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        print("Usage: python csv2update.py <csv_file>")
+    # flags: --ignore-missing, --fail-on-unknown
+    # default: validate ON (no flag needed)
+    fail_on_unknown = False
+    ignore_missing = False
+    args = [a for a in sys.argv[1:]]
+    if '--ignore-missing' in args:
+        ignore_missing = True
+        args.remove('--ignore-missing')
+    if '--fail-on-unknown' in args:
+        fail_on_unknown = True
+        args.remove('--fail-on-unknown')
+
+    if len(args) != 1:
+        print("Usage: python csv2update.py [--ignore-missing] [--fail-on-unknown] <csv_file>")
         sys.exit(1)
 
-    input_file = sys.argv[1]
+    input_file = args[0]
     try:
         edits = CsvEdits(input_file)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+
+    # Initialize RDF helpers with prefixes for CURIE expansion and ASK
+    helper = RdfHelpers(edits.get_prefixes())
+
+    unknown_curie_errors: List[str] = []
 
     for row in edits.get_data_rows():
         subject = row['subject']
@@ -80,6 +97,24 @@ def main() -> None:
         po_delete = parse_predicate_object_list(delete_val)
         po_insert = parse_predicate_object_list(insert_val)
         po_filter = parse_predicate_object_list(opt_filter)
+
+        # validation pass for INSERT objects (default ON unless --ignore-missing)
+        row_has_unknown = False
+        if not ignore_missing:
+            for _pred, obj in po_insert:
+                if helper.is_literal(obj) or helper.is_bnode(obj):
+                    continue
+                if helper.is_curie(obj) or helper.is_iri(obj):
+                    iri = obj.strip('<>') if helper.is_iri(obj) else helper.expand_curie(obj)
+                    if iri:
+                        known = helper.ask_exists(iri)
+                        if known is False:
+                            row_has_unknown = True
+                            unknown_curie_errors.append(f"Unknown object in INSERT for subject {subject}: {obj}")
+
+        # If there are unknowns and we are not ignoring, skip printing this update
+        if row_has_unknown and not ignore_missing:
+            continue
 
         lines: List[str] = []
         for pfx, uri in edits.get_prefixes():
@@ -108,6 +143,12 @@ def main() -> None:
 
         print("\n".join(lines))
         print()
+
+    if unknown_curie_errors:
+        for msg in unknown_curie_errors:
+            print(msg, file=sys.stderr)
+        if fail_on_unknown and not ignore_missing:
+            sys.exit(2)
 
 
 if __name__ == '__main__':
