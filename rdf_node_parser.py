@@ -1,10 +1,16 @@
+import warnings
 from typing import List, Tuple, Optional
-from rdflib import Graph, URIRef
+
+from rdflib import Graph, URIRef, Literal, BNode
+from rdflib.util import from_n3
 from rdflib.plugins.stores.sparqlstore import SPARQLStore
-from razu.sparql_endpoint_manager import SparqlEndpointManager
+# from razu.sparql_endpoint_manager import SparqlEndpointManager
+
+# Suppress rdflib URI validation warnings
+warnings.filterwarnings("ignore", message=".*does not look like a valid URI.*")
 
 
-class RdfHelpers:
+class RDFNodeParser:
     def __init__(self, prefixes: List[Tuple[str, str]]):
         self.prefixes_map = {p if p.endswith(':') else p + ':': u for p, u in prefixes}
 
@@ -35,23 +41,23 @@ class RdfHelpers:
         iri = base if base.endswith('/') or base.endswith('#') else base + ''
         return iri + local
 
-    def ask_exists(self, iri: str) -> Optional[bool]:
-        try:
-            endpoint = SparqlEndpointManager.get_endpoint_by_uri(URIRef(iri))
-        except Exception:
-            return None
-        if not endpoint:
-            return None
-        query = f"ASK WHERE {{ {{ <{iri}> ?p ?o }} UNION {{ ?s ?p <{iri}> }} }}"
-        try:
-            store = SPARQLStore(endpoint)
-            g = Graph(store=store)
-            res = g.query(query)
-            if hasattr(res, 'askAnswer'):
-                return bool(res.askAnswer)
-            try:
-                return bool(res)
-            except Exception:
-                return None
-        except Exception:
-            return None
+    # def ask_exists(self, iri: str) -> Optional[bool]:
+    #     try:
+    #         endpoint = SparqlEndpointManager.get_endpoint_by_uri(URIRef(iri))
+    #     except Exception:
+    #         return None
+    #     if not endpoint:
+    #         return None
+    #     query = f"ASK WHERE {{ {{ <{iri}> ?p ?o }} UNION {{ ?s ?p <{iri}> }} }}"
+    #     try:
+    #         store = SPARQLStore(endpoint)
+    #         g = Graph(store=store)
+    #         res = g.query(query)
+    #         if hasattr(res, 'askAnswer'):
+    #             return bool(res.askAnswer)
+    #         try:
+    #             return bool(res)
+    #         except Exception:
+    #             return None
+    #     except Exception:
+    #         return None
