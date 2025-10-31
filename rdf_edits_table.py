@@ -1,41 +1,43 @@
+"""
+CSV format and translation to SPARQL UPDATE
+
+CSV structure:
+- A prefix block at the top: column 1 contains the prefix (with or without a trailing colon), column 2 the base URI.
+  Example:
+    prefixes;;
+    ldto:;https://data.razu.nl/def/ldto/;
+    schema:;http://schema.org/;
+    object:;https://data.razu.nl/id/object/;
+    ...
+- Blank line(s)
+- Header and data rows:
+    subject;where;delete;insert
+    object:nl-wbdrazu-...;?s ldto:beperkingGebruik ?node . ...;?node ldto:...;"?node schema:... . ..."
+
+Row processing:
+- All CURIEs outside of <...> in subject/where/delete/insert are expanded to full IRIs based on the prefixes.
+- Local names may start with a digit (e.g. actor:64abc...).
+- The subject is converted to an <IRI>.
+
+SPARQL template per row:
+    DELETE { {delete} }
+    INSERT { {insert} }
+    WHERE  {
+      VALUES ?s { {subject} }
+      {where}
+    };
+
+Here, {where}, {delete}, and {insert} are the fragments after prefix expansion, inserted verbatim.
+"""
 import re
 import csv
-# import warnings
 from typing import List, Tuple, Dict, Any, Optional
 from rdflib import Graph, URIRef
 from rdflib.util import from_n3
 
-# # Suppress rdflib URI validation warnings
-# warnings.filterwarnings("ignore", message=".*does not look like a valid URI.*")
-
-def parse_predicate_object_list(value: str) -> List[Tuple[str, str]]:
-    """Parse a predicate-object list like 'p1 o1 ; p2 o2' into [(p1,o1), (p2,o2)].
-    Keeps quoted literals and brackets intact. Returns empty list if value is empty/whitespace.
-    """
-    if not value:
-        return []
-    s = value.strip()
-    if not s:
-        return []
-    # split on semicolons that separate pairs
-    parts = [part.strip() for part in s.split(';')]
-    pairs: List[Tuple[str, str]] = []
-    for part in parts:
-        if not part:
-            continue
-        # separate first whitespace into predicate and object (object may contain spaces)
-        m = re.match(r"^(\S+)\s+(.*)$", part)
-        if not m:
-            # if there is no whitespace, treat whole as predicate with missing object (skip)
-            continue
-        pred = m.group(1).strip()
-        obj = m.group(2).strip()
-        if pred and obj:
-            pairs.append((pred, obj))
-    return pairs
 
 class RDFEditsTable:
-    N3_NODE_COLS = {"subject"}  # kolommen die 1 N3-term bevatten
+    N3_NODE_COLS = {"subject"}  # columns that contain a single N3 term
 
     def __init__(self, input_file: str) -> None:
         self.input_file = input_file
@@ -43,16 +45,16 @@ class RDFEditsTable:
         self.header: List[str] = []
         self.rows_raw: List[List[str]] = []
         self.col_idx: Dict[str, int] = {}
-        self.g = Graph()  # alleen voor namespace manager
+        self.g = Graph()  # for namespace manager only
 
         with open(input_file, "r", newline="") as f:
             reader = csv.reader(f, delimiter=";")
             all_rows = [list(r) for r in reader]
 
         if not all_rows:
-            raise ValueError("Leeg CSV-bestand.")
+            raise ValueError("Empty CSV file.")
 
-        # prefixblok + header vinden
+        # find prefix block + header
         i = 0
         data_start_idx = None
         while i < len(all_rows):
@@ -62,22 +64,37 @@ class RDFEditsTable:
                 self.header = [c.strip() for c in row]
                 data_start_idx = i + 1
                 break
-            c2 = (row[1] if len(row) > 1 else "").strip()
+            if not row:
+                i += 1
+                continue
+            raw1 = (row[0] or '')
+            raw2 = (row[1] or '')
+            c1 = raw1.strip()
+            c2 = raw2.strip()
             if c1 and c2 and c1 != "prefixes":
-                self.prefixes.append((c1.rstrip(":"), c2))
+                p = c1.rstrip(":").strip()
+                u = c2.strip()
+                self.prefixes.append((p, u))
             i += 1
 
         if data_start_idx is None:
-            raise ValueError("Geen header rij gevonden die begint met 'subject'.")
+            raise ValueError("No header row starting with 'subject' found.")
 
         for p, u in self.prefixes:
             self.g.bind(p, u)
 
+        self.prefix_map: Dict[str, str] = {}
+        for p, u in self.prefixes:
+            pname = p.strip()
+            base = u.strip()
+            key = pname + ':'
+            self.prefix_map[key] = base
+
         self.col_idx = {name: idx for idx, name in enumerate(self.header)}
-        required = ["subject", "node_path", "optional_node_filter", "delete", "insert"]
+        required = ["subject", "where", "delete", "insert"]
         missing = [c for c in required if c not in self.col_idx]
         if missing:
-            raise ValueError(f"Vereiste kolommen ontbreken: {', '.join(missing)}")
+            raise ValueError(f"Required columns missing: {', '.join(missing)}")
 
         for row in all_rows[data_start_idx:]:
             if not row or all((c or "").strip() == "" for c in row):
@@ -91,14 +108,26 @@ class RDFEditsTable:
     def _parse_uri_str(self, s: str) -> Optional[str]:
         if not s:
             return None
-        n = from_n3(s, nsm=self.g.namespace_manager)
+        ss = s.strip()
+        if ss.startswith('<') and ss.endswith('>'):
+            return ss
+        m = re.match(r"^([A-Za-z_][\w\-]*:)([A-Za-z0-9_][\w\-.]*)$", ss)
+        if m:
+            pref = m.group(1)
+            local = m.group(2)
+            base = self.prefix_map.get(pref)
+            if base:
+                iri = base + local
+                return f"<{iri}>"
+        if ss.startswith('http://') or ss.startswith('https://'):
+            return f"<{ss}>"
+        n = from_n3(ss, nsm=self.g.namespace_manager)
         uri = str(n) if isinstance(n, URIRef) else None
         return f"<{uri}>" if uri else None
 
     def expand_path(self, path: str) -> str:
         if not path:
             return path
-        # Handle special case like "schema:copyrightHolder []"
         if path.endswith(' []'):
             base_path = path[:-3].strip()
             expanded_base = self.expand_path(base_path)
@@ -107,36 +136,52 @@ class RDFEditsTable:
         parts = path.split('/')
         out = []
         for p in parts:
+            token = p.strip()
+            if token.startswith('<') and token.endswith('>'):
+                out.append(token)
+                continue
+            m = re.match(r"^([A-Za-z_][\w\-]*:)([A-Za-z0-9_][\w\-.]*)$", token)
+            if m:
+                base = self.prefix_map.get(m.group(1))
+                if base:
+                    out.append(f"<{base}{m.group(2)}>" )
+                    continue
             try:
-                n = from_n3(p, nsm=self.g.namespace_manager)
-                uri = str(n) if isinstance(n, URIRef) else p
-                out.append(f"<{uri}>" if isinstance(n, URIRef) else p)
+                n = from_n3(token, nsm=self.g.namespace_manager)
+                if isinstance(n, URIRef):
+                    out.append(f"<{str(n)}>")
+                else:
+                    out.append(p)
             except Exception:
                 out.append(p)
         return '/'.join(out)
 
     def expand_all_curies(self, text: str) -> str:
-        """Vervang CURIEs buiten <...> door volledige IRIs. Laat literals en _: staan."""
+        """Replace CURIEs outside of <...> with full IRIs. Keep literals and blank nodes ([]) as-is."""
         if not text:
             return text
 
-        # Regex lokaal definiëren: alleen hier gebruikt
+        # Regex defined locally: used only here
         curie_re = re.compile(r"""
-            (?<!<)               # niet al binnen <...>
+            (?<!<)               # not already within <...>
             \b([A-Za-z_][\w\-]*) # prefix
             :
-            ([A-Za-z_][\w\-.]*)  # local name
+            ([A-Za-z0-9_][\w\-.]*)  # local name (may start with a digit)
             \b
-            (?!\s*\])            # niet gevolgd door ] (zoals "schema:copyrightHolder []")
         """, re.X)
 
         def repl(m: re.Match) -> str:
             token = m.group(0)
-            # probeer als N3-term te parseren; alleen URIRef vervangen
+            mm = re.match(r"^([A-Za-z_][\w\-]*:)([A-Za-z0-9_][\w\-.]*)$", token)
+            if mm:
+                base = self.prefix_map.get(mm.group(1))
+                if base:
+                    return f"<{base}{mm.group(2)}>"
             try:
                 n = from_n3(token, nsm=self.g.namespace_manager)
-                uri = str(n) if isinstance(n, URIRef) else None
-                return f"<{uri}>" if isinstance(n, URIRef) else token
+                if isinstance(n, URIRef):
+                    return f"<{str(n)}>"
+                return token
             except Exception:
                 return token
 
@@ -147,12 +192,10 @@ class RDFEditsTable:
 
     def get_data_rows(self) -> List[Dict[str, Any]]:
         """
-        Returned alleen 'expanded' waarden:
+        Returns only expanded values:
         - subject: URI string
-        - node_path: pad met volledige IRIs
-        - optional_node_filter: idem
-        - delete_expanded / insert_expanded: tekst met CURIEs vervangen
-        Plus de overige kolommen ongewijzigd.
+        - where/delete/insert: text with CURIEs expanded
+        Other columns are returned unchanged.
         """
         out: List[Dict[str, Any]] = []
         for r in self.rows_raw:
@@ -161,14 +204,11 @@ class RDFEditsTable:
             # subject → URI string
             subj_uri = self._parse_uri_str(d.get("subject", ""))
             if subj_uri is None:
-                raise ValueError(f"Subject geen IRI of CURIE: {d.get('subject')}")
+                raise ValueError(f"Subject is not an IRI or CURIE: {d.get('subject')}")
             d["subject"] = subj_uri
 
-            # paden expanden
-            d["node_path"] = self.expand_path(d.get("node_path", ""))
-            d["optional_node_filter"] = self.expand_path(d.get("optional_node_filter", ""))
-
-            # triple-fragmenten expanden
+            # expand where/delete/insert fragments
+            d["where"] = self.expand_all_curies(d.get("where", ""))
             d["delete"] = self.expand_all_curies(d.get("delete", ""))
             d["insert"] = self.expand_all_curies(d.get("insert", ""))
 
@@ -189,36 +229,67 @@ class RDFEditsTable:
 
 
 class UpdateStatementBuilder:
-    @staticmethod
-    def build(row: Dict[str, Any]) -> str:
-        subject = row['subject']
-        node_path = row['node_path']
-        opt_filter = row['optional_node_filter']
-        delete_val = row['delete']
-        insert_val = row['insert']
 
-        po_delete = parse_predicate_object_list(delete_val)
-        po_insert = parse_predicate_object_list(insert_val)
-        po_filter = parse_predicate_object_list(opt_filter)
+    @staticmethod
+    def parse_predicate_object_list(value: str) -> List[Tuple[str, str]]:
+        """Parse a predicate-object list like 'p1 o1 ; p2 o2' into [(p1,o1), (p2,o2)].
+        Keeps quoted literals and brackets intact. Returns empty list if value is empty/whitespace.
+        """
+        if not value:
+            return []
+        s = value.strip()
+        # Strip whole-field quotes (CSV quoting), but keep inner quotes for literals
+        if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+            s = s[1:-1].strip()
+        # Normalize internal excessive spaces around semicolons
+        s = re.sub(r"\s*;\s*", "; ", s)
+        if not s:
+            return []
+        # split on semicolons that separate pairs
+        parts = [part.strip() for part in s.split(';')]
+        pairs: List[Tuple[str, str]] = []
+        for part in parts:
+            if not part:
+                continue
+            # If predicate is an <IRI>, split at the first closing '>'
+            if part.startswith('<') and '>' in part:
+                idx = part.find('>')
+                pred = part[:idx+1].strip()
+                obj = part[idx+1:].strip()
+                if not obj:
+                    # no object content after '>', skip
+                    continue
+            else:
+                # separate first whitespace into predicate and object (object may contain spaces)
+                m = re.match(r"^(\S+)\s+(.*)$", part)
+                if not m:
+                    # if there is no whitespace, treat whole as predicate with missing object (skip)
+                    continue
+                pred = m.group(1).strip()
+                obj = m.group(2).strip()
+            if pred and obj:
+                pairs.append((pred, obj))
+        return pairs
+
+    @classmethod
+    def build(cls, row: Dict[str, Any]) -> str:
+        subject = row['subject']
+        where_val = (row.get('where') or '').strip()
+        delete_val = (row.get('delete') or '').strip()
+        insert_val = (row.get('insert') or '').strip()
 
         lines: List[str] = []
 
-        if po_delete:
-            lines.append("DELETE {")
-            for pred, obj in po_delete:
-                lines.append(f"  ?node {pred} {obj} .")
-            lines.append("}")
+        if delete_val:
+            lines.append(f"DELETE {{ {delete_val} }}")
 
-        if po_insert:
-            lines.append("INSERT {")
-            for pred, obj in po_insert:
-                lines.append(f"  ?node {pred} {obj} .")
-            lines.append("}")
+        if insert_val:
+            lines.append(f"INSERT {{ {insert_val} }}")
 
-        lines.append("WHERE {")
-        lines.append(f"  {subject} {node_path} ?node .")
-        for pred, obj in po_filter:
-            lines.append(f"  ?node {pred} {obj} .")
-        lines.append("}")
+        lines.append("WHERE  {")
+        lines.append(f"  VALUES ?s {{ {subject} }}")
+        if where_val:
+            lines.append(f"  {where_val}")
+        lines.append("};")
 
         return "\n".join(lines)
