@@ -22,6 +22,10 @@ Processing:
 
 Behavior:
 - For each subject, its corresponding JSON-LD file is copied into tmp/in/, loaded into an RDFLib graph, updated, and serialized to tmp/out/.
+
+BEWARE:
+- It assumes all rdf files are part of the same toegang / collection (so are in the same manifest.json).
+
 """
 
 import sys
@@ -34,7 +38,20 @@ from rdflib import Graph
 from rdf_edits_table import RDFEditsTable,  UpdateStatementBuilder
 from storage_paths import StorageResolver
 
- 
+# some manifest file helper functions:
+def _load_json(p: Path):
+    with p.open('r', encoding='utf-8') as f:
+        return json.load(f)
+def _save_json(p: Path, data):
+    with p.open('w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
+def _md5_file(p: Path) -> str:
+    h = hashlib.md5()
+    with p.open('rb') as f:
+        for chunk in iter(lambda: f.read(8192), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
 
 def main() -> None:
     ignore_missing = False
@@ -54,6 +71,11 @@ def main() -> None:
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+
+
+    # clear tmp/oin & out folders
+    shutil.rmtree(Path('tmp/out'))
+    shutil.rmtree(Path('tmp/in'))
 
     for row in edits_definition.get_data_rows():
         update = UpdateStatementBuilder.build(row)
@@ -89,30 +111,22 @@ def main() -> None:
         updated_manifest_file = Path('tmp/out') / manifest_file
         if not updated_manifest_file.exists():
             shutil.copy2(manifest_localfile, updated_manifest_file)
+            updated_manifest = _load_json(updated_manifest_file)
 
-        # updated updated manifest file, fields MD5Hash and MD5HashDate
-        def _load_json(p: Path):
-            with p.open('r', encoding='utf-8') as f:
-                return json.load(f)
-        def _save_json(p: Path, data):
-            with p.open('w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
-        def _md5_file(p: Path) -> str:
-            h = hashlib.md5()
-            with p.open('rb') as f:
-                for chunk in iter(lambda: f.read(8192), b''):
-                    h.update(chunk)
-            return h.hexdigest()
-
-        updated_manifest = _load_json(updated_manifest_file)
         s3_key = StorageResolver.relative_path_to_s3_key(relative_path)
         # Ensure entry exists
         entry = updated_manifest.setdefault(s3_key, {})
         entry['MD5Hash'] = _md5_file(out_path)
         entry['MD5HashDate'] = datetime.now(timezone.utc).isoformat()
-        _save_json(updated_manifest_file, updated_manifest)
+    
+    _save_json(updated_manifest_file, updated_manifest)
+
+    # # copy updated manifest file to edepot_base_dir
+    # shutil.copy2(updated_manifest_file, Path(edepot_base_dir) / manifest_file)
+    
+    # # copy updated rdf files to edepot_base_dir
+    # for p in Path('tmp/out').glob('**/*.meta.json'):
+    #     shutil.copy2(p, Path(edepot_base_dir) / p.relative_to('tmp/out'))
         
-
-
 if __name__ == '__main__':
     main()
