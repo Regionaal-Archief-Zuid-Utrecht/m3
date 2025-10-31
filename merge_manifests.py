@@ -19,7 +19,6 @@ Notes:
     with a different value, the script will raise an error. If the value is identical,
     it will be kept once.
 """
-from __future__ import annotations
 
 import argparse
 import json

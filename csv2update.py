@@ -75,7 +75,7 @@ def main() -> None:
 
     # clear tmp/oin & out folders
     shutil.rmtree(Path('tmp/out'))
-    # shutil.rmtree(Path('tmp/in'))
+    shutil.rmtree(Path('tmp/in'))
 
     for row in edits_definition.get_data_rows():
         update = UpdateStatementBuilder.build(row)

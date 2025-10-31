@@ -15,9 +15,8 @@ CSV structure:
     object:nl-wbdrazu-...;?s ldto:beperkingGebruik ?node . ...;?node ldto:...;"?node schema:... . ..."
 
 Row processing:
-- All CURIEs outside of <...> in subject/where/delete/insert are expanded to full IRIs based on the prefixes.
+- All CURIEs are expanded to full IRIs based on the prefixes.
 - Local names may start with a digit (e.g. actor:64abc...).
-- The subject is converted to an <IRI>.
 
 SPARQL template per row:
     DELETE { {delete} }
@@ -25,6 +24,7 @@ SPARQL template per row:
     WHERE  {
       VALUES ?s { {subject} }
       {where}
+      FILTER NOT EXISTS {insert}
     };
 
 Here, {where}, {delete}, and {insert} are the fragments after prefix expansion, inserted verbatim.
@@ -290,6 +290,8 @@ class UpdateStatementBuilder:
         lines.append(f"  VALUES ?s {{ {subject} }}")
         if where_val:
             lines.append(f"  {where_val}")
+            if insert_val:
+                lines.append(f"  FILTER NOT EXISTS {{ {insert_val} }}")
         lines.append("};")
 
         return "\n".join(lines)
