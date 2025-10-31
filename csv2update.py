@@ -75,7 +75,7 @@ def main() -> None:
 
     # clear tmp/oin & out folders
     shutil.rmtree(Path('tmp/out'))
-    shutil.rmtree(Path('tmp/in'))
+    # shutil.rmtree(Path('tmp/in'))
 
     for row in edits_definition.get_data_rows():
         update = UpdateStatementBuilder.build(row)
@@ -121,12 +121,14 @@ def main() -> None:
     
     _save_json(updated_manifest_file, updated_manifest)
 
-    # # copy updated manifest file to edepot_base_dir
-    # shutil.copy2(updated_manifest_file, Path(edepot_base_dir) / manifest_file)
+    # copy updated manifest file to edepot_base_dir
+    shutil.copy2(updated_manifest_file, Path(edepot_base_dir) / manifest_file)
+    print(f"Updated manifest file: {updated_manifest_file} {Path(edepot_base_dir) / manifest_file}")
     
-    # # copy updated rdf files to edepot_base_dir
-    # for p in Path('tmp/out').glob('**/*.meta.json'):
-    #     shutil.copy2(p, Path(edepot_base_dir) / p.relative_to('tmp/out'))
+    # copy updated rdf files to edepot_base_dir
+    for p in Path('tmp/out').glob('**/*.meta.json'):
+        # shutil.copy2(p, Path(edepot_base_dir) / p.relative_to('tmp/out'))
+        print(f"Updated rdf file: {p} {Path(edepot_base_dir) / p.relative_to('tmp/out')}")
         
 if __name__ == '__main__':
     main()
