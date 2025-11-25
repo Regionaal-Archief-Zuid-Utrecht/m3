@@ -6,7 +6,6 @@ This module provides utilities to derive filesystem relative paths and
 manifest locations from concept URIs and related identifiers. It will be
 extended with more mappings as needed (file names, URLs, IRIs, etc.).
 """
-from __future__ import annotations
 
 import re
 from pathlib import Path

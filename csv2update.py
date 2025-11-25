@@ -42,9 +42,11 @@ from storage_paths import StorageResolver
 def _load_json(p: Path):
     with p.open('r', encoding='utf-8') as f:
         return json.load(f)
+
 def _save_json(p: Path, data):
     with p.open('w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
+
 def _md5_file(p: Path) -> str:
     h = hashlib.md5()
     with p.open('rb') as f:
@@ -55,13 +57,27 @@ def _md5_file(p: Path) -> str:
 
 def main() -> None:
     ignore_missing = False
+    production = False
     args = [a for a in sys.argv[1:]]
-    if '--ignore-missing' in args:
-        ignore_missing = True
-        args.remove('--ignore-missing')
+
+    # parse flags, independent of order
+    i = 0
+    while i < len(args):
+        if args[i] == '--ignore-missing':
+            ignore_missing = True
+            del args[i]
+            continue
+        if args[i] == '--production':
+            if i + 1 >= len(args) or args[i + 1] != 'yes indeed':
+                print('To enable production writes, use: --production "yes indeed"')
+                sys.exit(1)
+            production = True
+            del args[i:i + 2]
+            continue
+        i += 1
 
     if len(args) != 2:
-        print("Usage: python csv2update.py [--ignore-missing] <edepot_base_dir> <csv_file>")
+        print('Usage: python csv2update.py [--ignore-missing] [--production "yes indeed"] <edepot_base_dir> <csv_file>')
         sys.exit(1)
 
     edepot_base_dir = args[0]
@@ -72,28 +88,54 @@ def main() -> None:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
+    if not production:
+        print('Dry-run mode: not copying updated manifest or RDF files to edepot_base_dir. Use --production "yes indeed" to enable copying.')
 
-    # clear tmp/oin & out folders
-    shutil.rmtree(Path('tmp/out'))
-    shutil.rmtree(Path('tmp/in'))
 
+    # clear tmp/in & out folders
+    try:
+        shutil.rmtree(Path('tmp/out'))
+    except FileNotFoundError:
+        pass
+    try:
+        shutil.rmtree(Path('tmp/in'))
+    except FileNotFoundError:
+        pass
+
+    # process each row
+    relative_path = None
     for row in edits_definition.get_data_rows():
         update = UpdateStatementBuilder.build(row)
 
+        is_first_iteration = relative_path is None
+        previous_relative_path = relative_path
+        
         relative_path = StorageResolver.concept_uri_to_metafile(row['subject'])
+        if not is_first_iteration and StorageResolver.relative_path_to_manifest_file(previous_relative_path) != StorageResolver.relative_path_to_manifest_file(relative_path):
+            raise ValueError("All subjects must be in the same manifest")
+        
         full_path = Path(edepot_base_dir) / relative_path
         print(f"Processing: {row['subject']} at {full_path}")
+
+        if is_first_iteration:
+            # copy manifest file to local 'in' folder
+            manifest_file = StorageResolver.relative_path_to_manifest_file(relative_path)
+            manifest_localfile = Path('tmp/in') / manifest_file
+            manifest_localfile.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(Path(edepot_base_dir) / manifest_file, manifest_localfile)
+
+            # copy (not yet) updated manifest file to local 'out' folder
+            updated_manifest_file = Path('tmp/out') / manifest_file
+            updated_manifest_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(manifest_localfile, updated_manifest_file)
+
+            # load manifest data
+            updated_manifest = _load_json(updated_manifest_file)
 
         # copy subject rdf file to local folder
         dest_path = Path('tmp/in') / relative_path
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(full_path, dest_path)
-
-        # copy manifest file to local folder if it does not exist yet
-        manifest_file = StorageResolver.relative_path_to_manifest_file(relative_path)
-        manifest_localfile = Path('tmp/in') / manifest_file
-        if not manifest_localfile.exists():
-            shutil.copy2(Path(edepot_base_dir) / manifest_file, manifest_localfile)
 
         # load subject rdf file into graph (JSON-LD)
         g = Graph()
@@ -107,28 +149,24 @@ def main() -> None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         g.serialize(destination=out_path.as_posix(), format='json-ld')
 
-        # copy updated manifest file to local folder if it does not exist yet
-        updated_manifest_file = Path('tmp/out') / manifest_file
-        if not updated_manifest_file.exists():
-            shutil.copy2(manifest_localfile, updated_manifest_file)
-            updated_manifest = _load_json(updated_manifest_file)
-
+        # update manifest data
         s3_key = StorageResolver.relative_path_to_s3_key(relative_path)
-        # Ensure entry exists
         entry = updated_manifest.setdefault(s3_key, {})
         entry['MD5Hash'] = _md5_file(out_path)
         entry['MD5HashDate'] = datetime.now(timezone.utc).isoformat()
     
+    # save updated manifest data
     _save_json(updated_manifest_file, updated_manifest)
 
-    # copy updated manifest file to edepot_base_dir
-    shutil.copy2(updated_manifest_file, Path(edepot_base_dir) / manifest_file)
-    print(f"Updated manifest file: {updated_manifest_file} {Path(edepot_base_dir) / manifest_file}")
-    
-    # copy updated rdf files to edepot_base_dir
-    for p in Path('tmp/out').glob('**/*.meta.json'):
-        # shutil.copy2(p, Path(edepot_base_dir) / p.relative_to('tmp/out'))
-        print(f"Updated rdf file: {p} {Path(edepot_base_dir) / p.relative_to('tmp/out')}")
+    if production:
+        # copy updated manifest file to edepot_base_dir
+        shutil.copy2(updated_manifest_file, Path(edepot_base_dir) / manifest_file)
+        print(f"Updated manifest file: {updated_manifest_file} {Path(edepot_base_dir) / manifest_file}")
+
+        # copy updated rdf files to edepot_base_dir
+        for p in Path('tmp/out').glob('**/*.meta.json'):
+            shutil.copy2(p, Path(edepot_base_dir) / p.relative_to('tmp/out'))
+            print(f"Updated rdf file: {p} {Path(edepot_base_dir) / p.relative_to('tmp/out')}")
         
 if __name__ == '__main__':
     main()
